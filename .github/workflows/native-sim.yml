@@ -147,21 +147,6 @@ jobs:
             npm install
           fi
 
-      - name: Restore iOS Firebase configuration
-        if: inputs.mode == 'build'
-        working-directory: ${{ inputs.project_dir }}
-        env:
-          GOOGLE_SERVICE_INFO_PLIST: ${{ secrets.IOS_GOOGLE_SERVICE_INFO_PLIST }}
-        run: |
-          set -euo pipefail
-          test -n "$GOOGLE_SERVICE_INFO_PLIST" || {
-            echo "::error::Missing IOS_GOOGLE_SERVICE_INFO_PLIST secret"
-            exit 1
-          }
-          mkdir -p personal/secrets
-          printf '%s' "$GOOGLE_SERVICE_INFO_PLIST" \
-            > personal/secrets/GoogleService-Info.plist
-
       - name: Fingerprint native build inputs
         working-directory: ${{ inputs.project_dir }}
         id: fp
