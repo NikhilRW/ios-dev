@@ -287,6 +287,13 @@ reuse the saved UDID for capture, build destination, install, launch, and logs.
   cookie exchange, a complete JPEG, unauthenticated HID rejection, and authenticated
   WebSocket admission both locally and through HTTPS. No simulated taps or app
   launch are performed during those checks.
+- Published 0.10.3 rejects an unauthenticated HID upgrade by destroying the TCP
+  socket, which the `ws` client reports as a pre-upgrade `ECONNRESET`. The negative
+  probe accepts that rejection, HTTP 401/403, or a policy close; the separate
+  authenticated probe must still receive input admission. Resets on authenticated
+  connections, timeouts, unexpected closes, and unauthenticated input data fail
+  startup. Public failure output identifies the individual check without printing
+  tokens, cookies, response bodies, or raw upstream exceptions.
 - serve-sim keeps helper URLs same-origin and honors the forwarded HTTPS scheme;
   cloudflared retains Host and supports WebSocket upgrades. No host-header override,
   extra auth proxy, or wildcard CORS permission is added.
@@ -320,6 +327,7 @@ compatibility and external relay/tunnel availability remain runtime checks.
 | Private URL fails or repeatedly redirects | Use the current session link, a top-level browser tab, and allow its cookie. Restarting preview changes the token. Inspect `status.sh`; do not post the full URL or cookie publicly. |
 | Video works but input fails | Click the simulator surface, try a Home-screen tap/drag, inspect browser Network WebSocket status locally. It should use `wss://` on the same hostname and authenticate. Try browser reload/current private link and disable interfering browser extensions. US-keyboard input is upstream's supported baseline. |
 | Capture or startup probe fails | The workflow deliberately fails closed. If SSH already exists, inspect the private directory from `private-dir.txt` and `startup-error.txt` locally; native capture may be incompatible with the image's Xcode/runtime. Those logs may contain the token; never attach them publicly. During initial setup failure the VM is disposed, so retry and investigate the pinned native tool/image compatibility before changing pins. |
+| Old startup reports only `local authentication, JPEG, and input admission checks` | Update `scripts/start-preview.sh` on the branch you run. The original negative WebSocket probe incorrectly rejected serve-sim 0.10.3's expected pre-upgrade connection reset. The corrected script accepts that rejection while still requiring authenticated admission; any further failure reports its exact subcheck and a token-safe check result when available. |
 | Swift build fails | Inspect `build/latest-build.log`, fix source, and repeat `build-run.sh`. After changing `project.yml`, rerun `prepare-project.sh`. Keep destination on the persisted simulator; signing is disabled for this build. |
 | App missing on run | Build first. `run.sh` requires `build/DerivedData/Build/Products/Debug-iphonesimulator/HelloIOS.app`. Installation and launch failures are returned, not hidden. |
 | Logs show little output | The static greeting emits few app logs; launch the app first. `Ctrl-C` stops log streaming only. |
@@ -336,6 +344,7 @@ Implementation environment: **Windows**, 2026-10-22. No workflow was dispatched.
 | Bash syntax and embedded Node JavaScript syntax | **Passed** |
 | ShellCheck 0.11.0 / Bash portability review | **Passed**; runtime macOS system Bash verification still required |
 | 15 mocked helper-contract checks (paths with spaces, simulator selection/persistence, pipeline failure status, install/launch ordering and error propagation, noninteractive private-link rejection) | **Passed on Windows/Git Bash**; mocks do not prove real Xcode/simulator operation |
+| 9 preview-probe regression checks over local HTTP/WebSockets (expected reset/401/403/policy rejection plus authenticated admission; unauthorized data, authenticated reset, timeout and unexpected-close failures) | **Passed on Windows** against the script's probe functions with fixture services; real simulator/tunnel checks still required |
 | Published npm 0.10.3 archive, actual `--help` and `--version`, required flags, state/auth source and matching API spec | **Passed**; help/version executed on Windows with native capture unused |
 | Runner label architecture, concrete release versions, action commit refs/inputs, attached zero-timeout behavior | **Passed — upstream metadata/source review** |
 | Token/public log/output paths and gitignored runtime/generated data | **Passed — static review** |

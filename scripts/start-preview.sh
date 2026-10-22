@@ -30,6 +30,12 @@ const { createRequire } = require('node:module');
 const [privateDir, cli, cloudflared, udid] = process.argv.slice(2);
 const records = {};
 let phase = 'pinned CLI interface verification';
+// Only errors constructed here may expose a public diagnostic. Upstream errors
+// and response bodies can contain credentials and stay in the private log.
+class ProbeError extends Error {}
+const probeError = (message, status) => new ProbeError(
+  message + (Number.isInteger(status) ? ` (HTTP ${status})` : '')
+);
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const alive = pid => { try { process.kill(pid, 0); return true; } catch { return false; } };
 const save = () => fs.writeFileSync('.dev-session/services.json', JSON.stringify(records));
@@ -59,12 +65,15 @@ async function healthy(url) {
 }
 async function verifyGate(url) {
   for (const route of ['/', '/api', `/helper/${udid}/stream.mjpeg`]) {
+    phase = `${url.startsWith('https:') ? 'HTTPS' : 'local'} unauthenticated ${route === '/' ? 'page' : route === '/api' ? 'API' : 'MJPEG'} rejection`;
     const res = await request(url + route);
     await res.body?.cancel();
-    if (res.status !== 401 && res.status !== 403) throw new Error('Unauthenticated preview access was not refused');
+    if (res.status !== 401 && res.status !== 403) throw probeError('Unauthenticated preview access was not refused', res.status);
   }
 }
 async function verifySession(url, token) {
+  const scope = url.startsWith('https:') ? 'HTTPS' : 'local';
+  phase = `${scope} token-to-cookie navigation`;
   // Emulate document navigation. Keep headers (including Set-Cookie) private.
   const nav = await request(url + '/?token=' + encodeURIComponent(token), {
     headers: { Accept: 'text/html', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' },
@@ -72,46 +81,58 @@ async function verifySession(url, token) {
   const cookie = nav.headers.getSetCookie().map(c => c.split(';')[0]).join('; ');
   const location = nav.headers.get('location');
   await nav.body?.cancel();
-  if (nav.status !== 302 || !cookie || !location || location.includes('token=')) throw new Error('Token-to-cookie navigation failed');
+  if (nav.status !== 302 || !cookie || !location || location.includes('token=')) throw probeError('Token-to-cookie navigation did not return a clean redirect and cookie', nav.status);
+  phase = `${scope} authenticated cookie navigation`;
   const page = await request(new URL(location, url), { headers: { Cookie: cookie } });
   await page.body?.cancel();
-  if (page.status !== 200) throw new Error('Authenticated cookie navigation failed');
+  if (page.status !== 200) throw probeError('Authenticated cookie navigation was refused', page.status);
+  phase = `${scope} authenticated JPEG frame`;
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
     const stream = await request(`${url}/helper/${udid}/stream.mjpeg`, {
       headers: { Cookie: cookie }, signal: controller.signal,
     });
-    if (stream.status !== 200) throw new Error('Authenticated MJPEG stream failed');
+    if (stream.status !== 200) throw probeError('Authenticated MJPEG stream was refused', stream.status);
     let data = Buffer.alloc(0);
     for await (const chunk of stream.body) {
       data = Buffer.concat([data, Buffer.from(chunk)]);
       if (data.includes(Buffer.from([0xff, 0xd8])) && data.includes(Buffer.from([0xff, 0xd9]))) break;
-      if (data.length > 4000000) throw new Error('No JPEG frame received');
+      if (data.length > 4000000) throw probeError('No JPEG frame received within the probe size limit');
     }
-    if (!data.includes(Buffer.from([0xff, 0xd9]))) throw new Error('No complete JPEG frame received');
+    if (!data.includes(Buffer.from([0xff, 0xd8])) || !data.includes(Buffer.from([0xff, 0xd9]))) throw probeError('Stream ended without a complete JPEG frame');
   } finally { clearTimeout(timer); controller.abort(); }
   const WebSocket = createRequire(cli)('ws');
   async function socket(authenticated) {
+    phase = `${scope} ${authenticated ? 'authenticated input admission' : 'unauthenticated input rejection'}`;
     await new Promise((resolve, reject) => {
       const ws = new WebSocket(`${url.replace(/^http/, 'ws')}/helper/${udid}/ws`,
         authenticated ? [`serve-sim.token.${token}`] : [], { headers: { Origin: url } });
       let done = false;
+      let opened = false;
       const finish = err => {
         if (done) return; done = true; clearTimeout(timeout); ws.terminate();
         if (err) reject(err); else resolve();
       };
-      const timeout = setTimeout(() => finish(new Error('Input socket admission timed out')), 12000);
+      const timeout = setTimeout(() => finish(probeError('Input socket check timed out')), 12000);
+      ws.on('open', () => { opened = true; });
       ws.on('unexpected-response', (_req, res) => {
         res.resume();
-        finish(!authenticated && [401, 403].includes(res.statusCode) ? null : new Error('Input handshake refused'));
+        finish(!authenticated && [401, 403].includes(res.statusCode) ? null : probeError('Input handshake returned an unexpected response', res.statusCode));
       });
       ws.on('message', data => {
-        if (!authenticated) return finish(new Error('Unauthenticated input received data'));
+        if (!authenticated) return finish(probeError('Unauthenticated input received data'));
         if (data[0] === 0x83 || data[0] === 0x82) finish();
       });
-      ws.on('close', code => finish(!authenticated && code === 1008 ? null : new Error('Input socket closed before admission')));
-      ws.on('error', () => finish(new Error('Input socket connection failed')));
+      ws.on('close', code => finish(!authenticated && code === 1008 ? null : probeError('Input socket closed before the expected result')));
+      ws.on('error', error => {
+        // Published 0.10.3 handleUpgrade calls socket.destroy() on missing auth.
+        // ws reports that pre-upgrade rejection as ECONNRESET / "socket hang up".
+        // Accept only that specific negative-probe result, never a timeout,
+        // DNS error, connection refusal, or an authenticated connection reset.
+        if (!authenticated && !opened && error.code === 'ECONNRESET') return finish();
+        finish(probeError('Input socket connection failed'));
+      });
     });
   }
   await socket(false);
@@ -162,6 +183,7 @@ async function verifySession(url, token) {
   // Upstream errors can contain tokens. Never stringify the caught exception here.
   fs.writeFileSync(path.join(privateDir, 'startup-error.txt'), String(error?.stack || error), { mode: 0o600 });
   console.error(`Preview startup failed during ${phase}. Private diagnostics are under the directory recorded in .dev-session/private-dir.txt. Do not publish those files.`);
+  if (error instanceof ProbeError) console.error(`Check result: ${error.message}`);
   for (const r of Object.values(records)) { try { process.kill(-r.pid, 'SIGTERM'); } catch {} }
   process.exitCode = 1;
 });
