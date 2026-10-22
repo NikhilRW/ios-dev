@@ -17,13 +17,14 @@ const path = require('node:path');
 try {
   const udid = process.argv[2];
   const dir = fs.readFileSync('.dev-session/private-dir.txt', 'utf8').trim();
-  const state = JSON.parse(fs.readFileSync(path.join(dir, 'state', `server-${udid}.json`), 'utf8'));
+  const state = JSON.parse(fs.readFileSync(path.join(dir, 'gate-session.json'), 'utf8'));
   const services = JSON.parse(fs.readFileSync('.dev-session/services.json', 'utf8'));
   const url = fs.readFileSync('.dev-session/tunnel-url.txt', 'utf8').trim();
-  if (!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(url) || !state.token || state.device !== udid || state.pid !== services.preview.pid) throw new Error();
-  process.kill(state.pid, 0);
+  if (!/^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/.test(url) || !/^[A-Za-z0-9_-]{43}$/.test(state.token) || state.device !== udid || state.previewPid !== services.preview.pid || state.gatePid !== services.gate.pid) throw new Error();
+  process.kill(state.previewPid, 0);
+  process.kill(state.gatePid, 0);
   process.kill(services.tunnel.pid, 0);
-  console.log(`${url}/?token=${encodeURIComponent(state.token)}`);
+  console.log(`${url}/?k=${encodeURIComponent(state.token)}`);
 } catch {
   console.error('Cannot read a live authenticated preview session. Run bash scripts/status.sh.');
   process.exitCode = 1;

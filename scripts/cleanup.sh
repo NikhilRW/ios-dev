@@ -36,7 +36,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   for (const file of ['services.json', 'private-dir.txt', 'tunnel-url.txt']) {
     try { fs.unlinkSync(path.join('.dev-session', file)); } catch {}
   }
-  console.log('Best-effort preview/tunnel cleanup complete.');
+  console.log('Best-effort preview/auth-gate/tunnel cleanup complete.');
 })().catch(() => { console.error('Cleanup incomplete; runner disposal is the final cleanup boundary.'); });
 NODE
 exit 0

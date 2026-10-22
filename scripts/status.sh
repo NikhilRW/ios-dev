@@ -39,12 +39,17 @@ if curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:3200/readyz -o /d
 else
   echo 'Capture readiness: unavailable'
 fi
+if curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:3199/__native-sim/healthz -o /dev/null 2>/dev/null; then
+  echo 'Local native-sim auth gate: running'
+else
+  echo 'Local native-sim auth gate: unavailable'
+fi
 if [[ -f .dev-session/tunnel-url.txt ]]; then
   IFS= read -r TUNNEL_URL < .dev-session/tunnel-url.txt
   if [[ "$TUNNEL_URL" =~ ^https://[a-z0-9-]+\.trycloudflare\.com$ ]] && \
-    curl -fsS --connect-timeout 3 --max-time 8 "$TUNNEL_URL/readyz" -o /dev/null 2>/dev/null; then
-    echo 'HTTPS tunnel readiness: ready'
+    curl -fsS --connect-timeout 3 --max-time 8 "$TUNNEL_URL/__native-sim/healthz" -o /dev/null 2>/dev/null; then
+    echo 'HTTPS tunnel/gate liveness: ready (capture readiness is reported separately)'
   else
-    echo 'HTTPS tunnel readiness: unavailable'
+    echo 'HTTPS tunnel/gate liveness: unavailable'
   fi
 fi

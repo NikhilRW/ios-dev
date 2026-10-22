@@ -7,13 +7,18 @@ its Home screen, rather than the macOS desktop.
 
 ```text
 Windows OpenSSH → Upterm relay → macos-26 arm64 runner → terminal + Xcode/simctl
-Windows browser → HTTPS Quick Tunnel → token-gated serve-sim → selected simulator
+Windows browser → HTTPS Quick Tunnel → native-sim auth gate → serve-sim → simulator
 ```
 
 There is no Xcode Canvas preview or live Swift reload. A Swift edit appears after
 another build and launch. Node is a host-side preview dependency; the app uses
 SwiftUI only. No Apple Developer membership, signing certificate, provisioning
 profile, or development team is needed for this simulator-only build.
+
+The workflow adapts the published **native-sim 0.2.2** template for SwiftUI. Its
+auth gate is vendored in `.github/native-sim/gate.cjs`; no native-sim CLI commands
+are needed to run the session. This replaces the earlier built-in serve-sim
+authentication approach with the user-approved native-sim gate.
 
 ## 1. GitHub and PC prerequisites
 
@@ -68,7 +73,7 @@ were not performed during implementation.
    Xcode, an installed iOS runtime, and GitHub SSH keys. It installs pinned tools,
    generates the project, boots one iPhone, and starts the authenticated preview.
    It does **not** compile, install, or launch HelloIOS.
-3. Wait for **Preview ready** and the **SSH command** in **Interactive Upterm
+3. Wait for **native-sim preview ready** and the **SSH command** in **Interactive Upterm
    session**. The bare preview hostname can be public; it does not authorize a
    viewer. The job summary is a convenience; live logs are the connection source.
 4. Paste the **exact `ssh ...` command** printed by Upterm into PowerShell.
@@ -104,7 +109,7 @@ bash scripts/preview-url.sh
 ```
 
 Open the printed **private navigation URL** on your PC. Initially you should see
-the simulator Home screen. `/?token=...` exchanges the session token for a cookie
+the simulator Home screen. `/?k=...` exchanges the gate session token for a cookie
 and redirects to a clean URL. The link grants simulator control and access to
 serve-sim's authenticated host actions: keep the full link private. A fresh token
 and tunnel hostname are created for each preview start.
@@ -147,8 +152,8 @@ state; a previous shell's exports are not required.
 | `bash scripts/build-run.sh` | Build, then run only on success |
 | `bash scripts/logs.sh` | Stream HelloIOS unified logs; **Ctrl-C** stops the stream and returns to the shell |
 | `bash scripts/status.sh` | Simulator identity/current state, PIDs, readiness, elapsed time, bare hostname; no token |
-| `bash scripts/preview-url.sh` | Read current token from private serve-sim JSON state; print only in interactive SSH |
-| `bash scripts/cleanup.sh` | Best-effort stop of recorded preview/tunnel process groups; remove private preview state |
+| `bash scripts/preview-url.sh` | Read current native-sim gate token from private JSON state; print only in interactive SSH |
+| `bash scripts/cleanup.sh` | Best-effort stop of recorded preview/auth-gate/tunnel process groups; remove private preview state |
 
 To restart a failed preview while SSH is still usable:
 
@@ -248,6 +253,7 @@ are safely local before exiting. Publishing recovered changes remains your choic
 | XcodeGen | **2.46.0**, release ZIP SHA-256 verified |
 | cloudflared | **2026.10.3**, Darwin arm64 archive SHA-256 verified |
 | Standalone preview | **`@expo/serve-sim@0.10.3`**, explicit exact npm install; runtime dependencies resolved by npm and its generated runner-local lockfile |
+| native-sim integration | **0.2.2**, adapted workflow template **v24** and vendored auth gate template **v18**; published npm package SHA-1 `b496a3a8938f44f18607259162f1bd64b1c74b32` |
 | Upterm | **v0.39.0**, action minimum >=v0.32.0 |
 | `actions/checkout` | **v6.1.0**, `d23441a48e516b6c34aea4fa41551a30e30af803` |
 | `actions/setup-node` | **v6.5.0**, `249970729cb0ef3589644e2896645e5dc5ba9c38` |
@@ -263,44 +269,77 @@ Simulator selection is deterministic: prefer non-foldable iPhones, then newest
 installed compatible iOS runtime, then name and UDID. Subsequent helper calls
 reuse the saved UDID for capture, build destination, install, launch, and logs.
 
+### How native-sim is adapted
+
+The published native-sim CLI validates Expo/React Native projects and its `up`
+command can commit, push, and dispatch. This SwiftUI repository uses its generated
+workflow pattern and bundled gate directly, rather than running `native-sim up`.
+The relevant adaptations are:
+
+- XcodeGen preparation and the existing manual `build-run.sh` replace automatic
+  Expo/RN builds, installation, and launch.
+- Attached Upterm replaces native-sim's post-build hold loop; the job cap is
+  **300 minutes total**, with no additional timer.
+- Tokens are minted privately on the runner rather than supplied as a workflow
+  dispatch input. Full private links are delivered only through SSH, never as an
+  Actions output or commit status. Permissions remain `contents: read`.
+- Host tools/actions keep their concrete pins rather than native-sim's moving
+  `latest` installs. The native-sim CLI's optional agent-device, TURN, R2, build
+  cache, and JavaScript tooling are not required for this SwiftUI session.
+- The vendored MIT gate retains upstream attribution. Its local adjustments
+  remove agent-device routing, use Secure cookies over HTTPS, disable response
+  caching, restrict the public health path, and clean up proxied sockets.
+
+Do not run `native-sim init --force` over these customized files; use the workflow
+already in this repository.
+
 ### Preview authentication and private state
 
-- `serve-sim` is bound to **127.0.0.1:3200**, with `--require-token`, HTTP/MJPEG,
+- `serve-sim` is bound to **127.0.0.1:3200**, with HTTP/MJPEG,
   30 fps, quality 0.7, max dimension 900. Clipboard startup capability is disabled
   because this minimal app does not need it. The Share button is hidden.
-- In published **0.10.3**, `--require-token` refuses `--detach` and
-  `--no-preview`. `start-preview.sh` therefore spawns the normal foreground
-  executable with Node's detached process group, redirected descriptors and
-  `unref()`. Options are passed directly to that executable.
+- The **native-sim gate** listens on **127.0.0.1:3199** and protects every preview,
+  API, streaming, and input request. Cloudflared exposes **3199**, not 3200.
+  Serve-sim's `--require-token` is replaced by this gate; its
+  `--allow-any-host-when-insecure` permits the forwarded tunnel Host behind the
+  authenticated gate. Both listeners remain loopback-only.
+- The normal foreground preview, gate, and tunnel run in detached process groups
+  with redirected descriptors and `unref()`. Foreground serve-sim preserves its
+  capture/host options, following native-sim's template approach.
 - Nonsecret configuration/PIDs/start time live in gitignored `.dev-session/`.
   Pinned tool paths are persisted in `tools.env`, so SSH shells work independently.
 - A randomly named mode-**700** directory under `$RUNNER_TEMP` holds stdout,
-  stderr, probe failure diagnostics, and `SERVE_SIM_STATE_DIR`. The pointer in
+  stderr, probe failure diagnostics, `gate-session.json`, and `SERVE_SIM_STATE_DIR`. The pointer in
   `.dev-session/private-dir.txt` is nonsecret. It is not the token.
-- The published `src/state.ts` / exported `@expo/serve-sim/state` interface defines
-  `SERVE_SIM_STATE_DIR/server-<UDID>.json` and its `token`, `pid`, `port`, and
-  `device` fields. `preview-url.sh` reads and validates these fields directly,
-  rather than scraping human-readable logs. State files are mode **600**.
-- Startup waits for **`/readyz`**, not just a listener, before opening the tunnel.
-  Then it waits for the assigned hostname and external readiness. All waits are
-  bounded. It checks unauthenticated page/API/MJPEG rejection, the navigation
+- Startup creates a fresh 32-byte base64url gate token and supplies it only to the
+  gate child process through `NATIVE_SIM_GATE_TOKEN`. The private mode-**600**
+  `gate-session.json` records `token`, `device`, `previewPid`, and `gatePid`.
+  `preview-url.sh` validates these fields against the live service PIDs and emits
+  `https://<tunnel>/?k=<token>` only in the user's interactive SSH terminal.
+  Serve-sim's own internal state/log output also stays private.
+- Startup waits for serve-sim's loopback **`/readyz`**, then the gate's local
+  liveness endpoint, before opening the tunnel. It waits for the assigned hostname
+  and external gate liveness, and verifies real authenticated JPEG delivery and
+  WebSocket admission. All waits are bounded. It checks unauthenticated page/API/MJPEG rejection, the navigation
   cookie exchange, a complete JPEG, unauthenticated HID rejection, and authenticated
   WebSocket admission both locally and through HTTPS. No simulated taps or app
   launch are performed during those checks.
-- Published 0.10.3 rejects an unauthenticated HID upgrade by destroying the TCP
-  socket, which the `ws` client reports as a pre-upgrade `ECONNRESET`. The negative
-  probe accepts that rejection, HTTP 401/403, or a policy close; the separate
-  authenticated probe must still receive input admission. Resets on authenticated
-  connections, timeouts, unexpected closes, and unauthenticated input data fail
+- The gate returns explicit HTTP **403** on an unauthenticated WebSocket upgrade;
+  the separate cookie-authenticated probe must receive input admission. Connection
+  resets, timeouts, unexpected closes, and unauthenticated input data fail
   startup. Public failure output identifies the individual check without printing
   tokens, cookies, response bodies, or raw upstream exceptions.
 - serve-sim keeps helper URLs same-origin and honors the forwarded HTTPS scheme;
-  cloudflared retains Host and supports WebSocket upgrades. No host-header override,
-  extra auth proxy, or wildcard CORS permission is added.
-- Public `/healthz` and `/readyz` are intentional upstream exceptions. The preview,
-  `/api`, stream, and control require authentication. Browser navigation gets a
-  cookie and clean redirect; WebSocket clients can authenticate using the
-  `serve-sim.token.<token>` subprotocol. The preview handles this itself.
+  the gate preserves Host and cloudflared's forwarded scheme for HTTP and WebSocket
+  upgrades. No wildcard CORS permission is added.
+- Only **`/__native-sim/healthz`** is public through the gate, and it indicates
+  gate liveness, not video readiness. Even upstream `/healthz` and `/readyz` need
+  gate authentication through the public tunnel. Browser navigation exchanges
+  `?k=` for the `native_sim_k` HttpOnly/SameSite=Lax cookie (Secure over HTTPS)
+  and redirects to a clean URL. The browser sends that cookie on its input socket.
+  Bearer authentication is also available to the gate; query tokens are refused
+  on WebSocket upgrades. Serve-sim handles its internal host-action token behind
+  the gate.
 - No token-bearing files, URLs, or output are sent to Actions outputs, artifacts,
   summaries, or public logs. Do not run serve-sim yourself without private output
   redirection, use shell tracing, dump environment/private state, or publish the
@@ -327,7 +366,7 @@ compatibility and external relay/tunnel availability remain runtime checks.
 | Private URL fails or repeatedly redirects | Use the current session link, a top-level browser tab, and allow its cookie. Restarting preview changes the token. Inspect `status.sh`; do not post the full URL or cookie publicly. |
 | Video works but input fails | Click the simulator surface, try a Home-screen tap/drag, inspect browser Network WebSocket status locally. It should use `wss://` on the same hostname and authenticate. Try browser reload/current private link and disable interfering browser extensions. US-keyboard input is upstream's supported baseline. |
 | Capture or startup probe fails | The workflow deliberately fails closed. If SSH already exists, inspect the private directory from `private-dir.txt` and `startup-error.txt` locally; native capture may be incompatible with the image's Xcode/runtime. Those logs may contain the token; never attach them publicly. During initial setup failure the VM is disposed, so retry and investigate the pinned native tool/image compatibility before changing pins. |
-| Old startup reports only `local authentication, JPEG, and input admission checks` | Update `scripts/start-preview.sh` on the branch you run. The original negative WebSocket probe incorrectly rejected serve-sim 0.10.3's expected pre-upgrade connection reset. The corrected script accepts that rejection while still requiring authenticated admission; any further failure reports its exact subcheck and a token-safe check result when available. |
+| Old startup reports only `local authentication, JPEG, and input admission checks` | Publish the native-sim gate/workflow/script updates, then start a **new Run workflow** on that updated branch. Re-running an old job uses its old commit. The native-sim gate now handles authentication and returns explicit 403 responses to unauthorized input upgrades. |
 | Swift build fails | Inspect `build/latest-build.log`, fix source, and repeat `build-run.sh`. After changing `project.yml`, rerun `prepare-project.sh`. Keep destination on the persisted simulator; signing is disabled for this build. |
 | App missing on run | Build first. `run.sh` requires `build/DerivedData/Build/Products/Debug-iphonesimulator/HelloIOS.app`. Installation and launch failures are returned, not hidden. |
 | Logs show little output | The static greeting emits few app logs; launch the app first. `Ctrl-C` stops log streaming only. |
@@ -335,7 +374,9 @@ compatibility and external relay/tunnel availability remain runtime checks.
 
 ## Verification results and real-run acceptance
 
-Implementation environment: **Windows**, 2026-10-22. No workflow was dispatched.
+Implementation environment: **Windows**. No workflow was dispatched by the
+implementing agent. A user-run earlier session failed during the old local
+authentication probes; the native-sim adaptation still needs real-run validation.
 
 | Check | Result |
 | --- | --- |
@@ -344,7 +385,8 @@ Implementation environment: **Windows**, 2026-10-22. No workflow was dispatched.
 | Bash syntax and embedded Node JavaScript syntax | **Passed** |
 | ShellCheck 0.11.0 / Bash portability review | **Passed**; runtime macOS system Bash verification still required |
 | 15 mocked helper-contract checks (paths with spaces, simulator selection/persistence, pipeline failure status, install/launch ordering and error propagation, noninteractive private-link rejection) | **Passed on Windows/Git Bash**; mocks do not prove real Xcode/simulator operation |
-| 9 preview-probe regression checks over local HTTP/WebSockets (expected reset/401/403/policy rejection plus authenticated admission; unauthorized data, authenticated reset, timeout and unexpected-close failures) | **Passed on Windows** against the script's probe functions with fixture services; real simulator/tunnel checks still required |
+| 8 native-sim gate tests over real local HTTP/TCP sockets (denied routes/keys/upgrades, cookie exchange, live streaming, bidirectional WebSocket proxying, forwarded Host/scheme) | **Passed on Windows** using fixture upstreams; run with `node --test --test-timeout=15000 tests/native-sim-gate.test.cjs` |
+| Startup probe functions against the vendored gate with a fixture preview | **Passed on Windows**: unauthenticated HTTP/WebSocket rejection, cookie navigation, JPEG delivery, authenticated input admission; real native capture/tunnel still required |
 | Published npm 0.10.3 archive, actual `--help` and `--version`, required flags, state/auth source and matching API spec | **Passed**; help/version executed on Windows with native capture unused |
 | Runner label architecture, concrete release versions, action commit refs/inputs, attached zero-timeout behavior | **Passed — upstream metadata/source review** |
 | Token/public log/output paths and gitignored runtime/generated data | **Passed — static review** |
@@ -377,6 +419,8 @@ After you authorize/start a run, verify the not-run rows. In particular:
 - [Upterm action v2.7.0](https://github.com/owenthereal/action-upterm/tree/b9dfa526f890bbd5162d781f8d9c69b97731d73d)
 - [Upterm v0.39.0](https://github.com/owenthereal/upterm/releases/tag/v0.39.0)
 - [Published serve-sim 0.10.3](https://www.npmjs.com/package/@expo/serve-sim/v/0.10.3)
+- [Published native-sim 0.2.2 workflow and gate templates](https://www.npmjs.com/package/native-sim/v/0.2.2)
+- [native-sim upstream](https://github.com/bidah/native-sim)
 - [Matching serve-sim API/auth spec at published gitHead](https://github.com/expo/expo-device-hub/blob/2dbd92873b6ce44722cb0d283c70bd2684172c63/llp/0003-serve-sim-http-api.spec.md)
 - [Matching state interface](https://github.com/expo/expo-device-hub/blob/2dbd92873b6ce44722cb0d283c70bd2684172c63/packages/serve-sim/packages/serve-sim/src/state.ts)
 - [Cloudflare Quick Tunnels and limitations](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)

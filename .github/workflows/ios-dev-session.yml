@@ -1,3 +1,6 @@
+# Adapted from native-sim@0.2.2 workflow template v24: simulator -> serve-sim
+# -> bundled auth gate -> Quick Tunnel. SwiftUI/XcodeGen and attached Upterm
+# replace its Expo/RN builds, CLI dispatch inputs, commit statuses and hold loop.
 name: iOS development session
 
 on:
@@ -77,7 +80,7 @@ jobs:
       - name: Select and boot installed simulator
         run: bash scripts/boot-simulator.sh
 
-      - name: Start authenticated preview and HTTPS tunnel
+      - name: Start native-sim preview, auth gate, and HTTPS tunnel
         run: bash scripts/start-preview.sh
 
       - name: Publish connection instructions
