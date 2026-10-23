@@ -1,6 +1,0 @@
-* text=auto
-*.sh text eol=lf
-*.cjs text eol=lf
-*.swift text eol=lf
-*.yml text eol=lf
-*.md text eol=lf

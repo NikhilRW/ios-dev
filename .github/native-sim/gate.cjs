@@ -1,138 +1,184 @@
-// Adapted from native-sim@0.2.2, templates/gate.cjs (template version 18).
-// Upstream: https://github.com/bidah/native-sim — Rodrigo Figueroa.
-// Published package SHA-1: b496a3a8938f44f18607259162f1bd64b1c74b32.
-// Changes: no agent-device route; private runner-generated token; exact health
-// path; secure HTTPS cookie; no-store responses; clean redirects; socket cleanup.
-// SPDX-License-Identifier: MIT
-/*
-Copyright (c) Rodrigo Figueroa
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in
-all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-THE SOFTWARE.
-*/
+// native-sim-template-version: 18
+/**
+ * native-sim auth gate.
+ *
+ * serve-sim ships no authentication, so exposing port 3200 through a public
+ * tunnel would hand simulator control to anyone who guessed the URL. This is a
+ * dependency-free reverse proxy that requires `?k=<token>` once, trades it for
+ * an HttpOnly cookie, and forwards everything (including the MJPEG stream and
+ * the control WebSocket) to serve-sim on localhost.
+ *
+ * It also multiplexes a second upstream onto the same tunnel: when
+ * NATIVE_SIM_AGENT_PORT is set, `/agent-device/*` is routed to the local
+ * `agent-device proxy` instead of serve-sim, so one URL carries both the
+ * human-facing stream and the agent-facing control API.
+ */
 const http = require('node:http');
 const net = require('node:net');
-const { timingSafeEqual } = require('node:crypto');
 
 const TOKEN = process.env.NATIVE_SIM_GATE_TOKEN || '';
 const TARGET_PORT = Number(process.env.NATIVE_SIM_TARGET_PORT || 3200);
+// 0 disables the agent-device route entirely, so a session started without
+// --agent exposes no extra surface at all.
+const AGENT_PORT = Number(process.env.NATIVE_SIM_AGENT_PORT || 0);
+const AGENT_PREFIX = '/agent-device';
+const TARGET_HOST = '127.0.0.1';
 const PORT = Number(process.env.NATIVE_SIM_GATE_PORT || 3199);
 const COOKIE = 'native_sim_k';
 
-if (!/^[A-Za-z0-9_-]{43}$/.test(TOKEN) ||
-    ![PORT, TARGET_PORT].every(p => Number.isInteger(p) && p > 0 && p <= 65535) || PORT === TARGET_PORT) {
-  console.error('A fresh 32-byte base64url NATIVE_SIM_GATE_TOKEN and distinct valid loopback ports are required.');
+if (!TOKEN) {
+  console.error('NATIVE_SIM_GATE_TOKEN is required — refusing to proxy an unauthenticated simulator');
   process.exit(1);
 }
 
-function matches(value) {
-  if (typeof value !== 'string') return false;
-  const bytes = Buffer.from(value);
-  const expected = Buffer.from(TOKEN);
-  return bytes.length === expected.length && timingSafeEqual(bytes, expected);
+function timingSafeEqual(a, b) {
+  if (typeof a !== 'string' || a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }
 
-function authorize(req, allowQuery = true) {
-  for (const part of (req.headers.cookie || '').split(';')) {
-    const [name, ...value] = part.trim().split('=');
-    if (name === COOKIE && matches(value.join('='))) return 'cookie';
+function cookieToken(req) {
+  const raw = req.headers.cookie || '';
+  for (const part of raw.split(';')) {
+    const [name, ...rest] = part.trim().split('=');
+    if (name === COOKIE) return rest.join('=');
   }
-  const bearer = /^Bearer\s+(.+)$/i.exec(req.headers.authorization || '');
-  if (bearer && matches(bearer[1])) return 'bearer';
+  return null;
+}
+
+/** agent-device authenticates with a bearer header; it never sends cookies. */
+function bearerToken(req) {
+  const match = /^Bearer\s+(.+)$/i.exec((req.headers.authorization || '').trim());
+  return match ? match[1] : null;
+}
+
+function pathnameOf(req) {
+  return new URL(req.url, 'http://localhost').pathname;
+}
+
+/** True when this request belongs to the agent-device proxy, not serve-sim. */
+function isAgentRoute(req) {
+  if (!AGENT_PORT) return false;
+  const path = pathnameOf(req);
+  return path === AGENT_PREFIX || path.startsWith(`${AGENT_PREFIX}/`);
+}
+
+/** Returns 'cookie' | 'bearer' | 'query' when authorised, or false. */
+function authorize(req) {
+  if (timingSafeEqual(cookieToken(req), TOKEN)) return 'cookie';
+  if (timingSafeEqual(bearerToken(req), TOKEN)) return 'bearer';
   const url = new URL(req.url, 'http://localhost');
-  if (allowQuery && matches(url.searchParams.get('k'))) return 'query';
+  if (timingSafeEqual(url.searchParams.get('k'), TOKEN)) return 'query';
   return false;
 }
 
-const DENIED = '<!doctype html><meta charset="utf-8"><title>native-sim</title>' +
-  '<h1>Authentication required</h1><p>Connect through SSH and run ' +
-  '<code>bash scripts/preview-url.sh</code> for this session\'s private link.</p>';
+const DENIED = `<!doctype html><meta charset=utf-8><title>native-sim</title>
+<style>body{font:14px/1.6 -apple-system,system-ui,sans-serif;margin:15vh auto;max-width:34rem;padding:0 1.5rem;color:#111}
+@media(prefers-color-scheme:dark){body{background:#111;color:#eee}}code{background:#8882;padding:.15em .4em;border-radius:4px}</style>
+<h1>🔒 native-sim</h1>
+<p>This simulator stream needs the access key from the link the CLI printed.</p>
+<p>Ask whoever started the session for the full URL — the one ending in <code>?k=…</code>.</p>`;
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://localhost');
-  if (url.pathname === '/__native-sim/healthz') {
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({ ok: true, target: TARGET_PORT }));
+  if (req.url.startsWith('/__native-sim/healthz')) {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ ok: true, target: TARGET_PORT, agent: AGENT_PORT || null }));
     return;
   }
+
   const auth = authorize(req);
   if (!auth) {
-    res.writeHead(403, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+    // agent-device leaves /health unauthenticated for reachability probes; the
+    // gate deliberately does not, so an unauthenticated request can never reach
+    // either upstream. `connect proxy` carries --daemon-auth-token on every
+    // request, including that probe, so it authenticates normally.
+    res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
     res.end(DENIED);
     return;
   }
-  if (auth === 'query') {
+
+  const agent = isAgentRoute(req);
+
+  // Trade the query token for a cookie so the key stops travelling in URLs
+  // (and so the preview's own fetches and WebSocket upgrades carry it). Never
+  // on the agent route: a 302 mid-RPC would break the client, which has no
+  // cookie jar and already authenticates per request.
+  if (auth === 'query' && !agent) {
+    const url = new URL(req.url, 'http://localhost');
     url.searchParams.delete('k');
-    const https = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim() === 'https';
     res.writeHead(302, {
-      'Set-Cookie': `${COOKIE}=${TOKEN}; Path=/; HttpOnly; SameSite=Lax${https ? '; Secure' : ''}`,
-      Location: url.pathname.replace(/^\/+/, '/') + url.search,
-      'Cache-Control': 'no-store',
-      'Referrer-Policy': 'no-referrer',
+      'set-cookie': `${COOKIE}=${TOKEN}; Path=/; HttpOnly; SameSite=Lax; Max-Age=43200`,
+      location: url.pathname + url.search,
     });
     res.end();
     return;
   }
-  const upstream = http.request({
-    host: '127.0.0.1', port: TARGET_PORT, method: req.method, path: req.url,
-    // Preserve the public Host so serve-sim advertises same-origin video/input
-    // URLs. Cloudflared supplies x-forwarded-proto; local probes use HTTP.
-    headers: { ...req.headers, 'x-forwarded-host': req.headers.host },
-  }, upRes => {
-    res.writeHead(upRes.statusCode || 502, { ...upRes.headers, 'cache-control': 'no-store' });
-    upRes.pipe(res);
+
+  const upstream = http.request(
+    {
+      host: TARGET_HOST,
+      port: agent ? AGENT_PORT : TARGET_PORT,
+      method: req.method,
+      // The agent-device proxy serves these routes under /agent-device/* itself,
+      // so the path is forwarded verbatim rather than stripped.
+      path: req.url,
+      // Do NOT rewrite Host. serve-sim derives the URLs it advertises to the
+      // browser from these headers; pointing them at 127.0.0.1:3200 makes the
+      // page open its control WebSocket against the *viewer's* loopback, which
+      // fails as "control socket connect timeout". Forward the public origin so
+      // the helper and WebSocket URLs stay same-origin and route back through
+      // this gate.
+      headers: {
+        ...req.headers,
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': req.headers.host,
+      },
+    },
+    (upRes) => {
+      res.writeHead(upRes.statusCode || 502, upRes.headers);
+      upRes.pipe(res);
+    },
+  );
+
+  upstream.on('error', (err) => {
+    if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' });
+    res.end(`upstream error: ${err.message}`);
   });
-  upstream.on('error', () => {
-    if (!res.headersSent) res.writeHead(502, { 'Content-Type': 'text/plain', 'Cache-Control': 'no-store' });
-    res.end('Simulator preview upstream is unavailable.');
-  });
-  res.on('close', () => upstream.destroy());
-  req.on('error', () => upstream.destroy());
+
   req.pipe(upstream);
 });
 
+// WebSockets carry simulator input, so the upgrade path has to be proxied too.
 server.on('upgrade', (req, socket, head) => {
-  // Browsers send the gate cookie; probes can send its bearer token. Never
-  // put the gate token in a WebSocket query string.
-  if (!authorize(req, false)) {
-    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
+  if (!authorize(req)) {
+    socket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
     return;
   }
-  const upstream = net.connect(TARGET_PORT, '127.0.0.1', () => {
-    const forwarded = { ...req.headers, 'x-forwarded-host': req.headers.host };
-    const headers = Object.entries(forwarded).flatMap(([name, value]) =>
-      (Array.isArray(value) ? value : [value]).map(v => `${name}: ${v}`)
-    ).join('\r\n');
+
+  const upstream = net.connect(isAgentRoute(req) ? AGENT_PORT : TARGET_PORT, TARGET_HOST, () => {
+    const forwarded = {
+      ...req.headers,
+      'x-forwarded-proto': 'https',
+      'x-forwarded-host': req.headers.host,
+    };
+    const headers = Object.entries(forwarded)
+      .map(([k, v]) => (Array.isArray(v) ? v.map((x) => `${k}: ${x}`).join('\r\n') : `${k}: ${v}`))
+      .join('\r\n');
     upstream.write(`${req.method} ${req.url} HTTP/1.1\r\n${headers}\r\n\r\n`);
-    if (head.length) upstream.write(head);
+    if (head && head.length) upstream.write(head);
     upstream.pipe(socket);
     socket.pipe(upstream);
   });
-  const drop = () => { socket.destroy(); upstream.destroy(); };
+
+  const drop = () => {
+    socket.destroy();
+    upstream.destroy();
+  };
   upstream.on('error', drop);
   socket.on('error', drop);
-  upstream.on('close', () => socket.destroy());
-  socket.on('close', () => upstream.destroy());
 });
 
-// MJPEG is long-lived. Do not impose a whole-request/socket timeout.
-server.requestTimeout = 0;
-server.timeout = 0;
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`native-sim auth gate on 127.0.0.1:${PORT} -> 127.0.0.1:${TARGET_PORT}`);
+  console.log(`native-sim gate on :${PORT} -> :${TARGET_PORT}${AGENT_PORT ? ` (agent-device -> :${AGENT_PORT})` : ''}`);
 });

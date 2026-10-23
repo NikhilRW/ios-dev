@@ -1,0 +1,4 @@
+{
+  "extends": "@react-native/typescript-config",
+  "include": ["App.tsx", "personal/AttendanceApp.tsx", "personal/attendanceLogic.ts", "__tests__/Attendance.test.ts"]
+}
