@@ -1,4 +1,4 @@
-// native-sim-template-version: 18
+// native-sim-template-version: 19
 /**
  * native-sim auth gate.
  *
@@ -15,6 +15,7 @@
  */
 const http = require('node:http');
 const net = require('node:net');
+const { open } = require('node:fs/promises');
 
 const TOKEN = process.env.NATIVE_SIM_GATE_TOKEN || '';
 const TARGET_PORT = Number(process.env.NATIVE_SIM_TARGET_PORT || 3200);
@@ -25,6 +26,48 @@ const AGENT_PREFIX = '/agent-device';
 const TARGET_HOST = '127.0.0.1';
 const PORT = Number(process.env.NATIVE_SIM_GATE_PORT || 3199);
 const COOKIE = 'native_sim_k';
+// One fixed, workflow-owned file. No client-supplied filesystem paths.
+const IPA_FILE = process.env.NATIVE_SIM_IPA_FILE || '';
+const IPA_ROUTE = '/__native-sim/unsigned.ipa';
+
+async function serveIpa(req, res) {
+  if (!['GET', 'HEAD'].includes(req.method)) {
+    res.writeHead(405, { allow: 'GET, HEAD', 'cache-control': 'no-store' });
+    res.end();
+    return;
+  }
+  let file;
+  try {
+    if (!IPA_FILE) throw Object.assign(new Error(), { code: 'ENOENT' });
+    file = await open(IPA_FILE, 'r');
+    const stat = await file.stat();
+    if (!stat.isFile()) throw Object.assign(new Error(), { code: 'ENOENT' });
+    if (res.destroyed) { await file.close(); return; }
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-disposition': 'attachment; filename="unsigned.ipa"',
+      'content-length': stat.size,
+      'cache-control': 'no-store',
+      'x-content-type-options': 'nosniff',
+    });
+    if (req.method === 'HEAD') { await file.close(); res.end(); return; }
+    const stream = file.createReadStream();
+    file = null; // The stream now owns the file handle, including closing it.
+    stream.on('error', () => res.destroy());
+    res.once('close', () => stream.destroy());
+    stream.pipe(res);
+  } catch (error) {
+    if (file) await file.close().catch(() => {});
+    if (res.destroyed) return;
+    if (res.headersSent) { res.destroy(); return; }
+    res.writeHead(error.code === 'ENOENT' ? 404 : 500, {
+      'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store',
+    });
+    res.end(error.code === 'ENOENT'
+      ? 'No IPA exported yet. Run native-sim-export-ipa in your SSH session.'
+      : 'Unable to read the exported IPA.');
+  }
+}
 
 if (!TOKEN) {
   console.error('NATIVE_SIM_GATE_TOKEN is required — refusing to proxy an unauthenticated simulator');
@@ -115,6 +158,11 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (pathnameOf(req) === IPA_ROUTE) {
+    void serveIpa(req, res);
+    return;
+  }
+
   const upstream = http.request(
     {
       host: TARGET_HOST,
@@ -180,5 +228,5 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, '127.0.0.1', () => {
-  console.log(`native-sim gate on :${PORT} -> :${TARGET_PORT}${AGENT_PORT ? ` (agent-device -> :${AGENT_PORT})` : ''}`);
+  console.log(`native-sim gate on :${server.address().port} -> :${TARGET_PORT}${AGENT_PORT ? ` (agent-device -> :${AGENT_PORT})` : ''}`);
 });
