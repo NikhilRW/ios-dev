@@ -1,5 +1,5 @@
 #!/bin/bash
-# native-sim-template-version: 1
+# native-sim-template-version: 2
 set -euo pipefail
 
 if [ -n "${NATIVE_SIM_DEV_CONFIG:-}" ] && [ -f "$NATIVE_SIM_DEV_CONFIG" ]; then
@@ -42,6 +42,20 @@ case "$CONTAINER" in
 esac
 SCHEME="${NATIVE_SIM_SCHEME:-$DEFAULT_SCHEME}"
 
+XCODE_CACHE_ARGS=()
+if [ "${NATIVE_SIM_COMPILATION_CACHE:-}" = YES ]; then
+  XCODE_CACHE_ARGS+=(COMPILATION_CACHE_ENABLE_CACHING=YES "COMPILATION_CACHE_CAS_PATH=$PWD/build/native-sim-device/CompilationCache.noindex")
+fi
+PRODUCTS=build/native-sim-device/Build/Products/Release-iphoneos
+if [ "${NATIVE_SIM_RESTORED_XCODE:-}" = true ]; then
+  if [ -f build/native-sim-device/native-sim-mtimes.json ]; then
+    python3 "$GITHUB_WORKSPACE/.github/native-sim/xcode-mtimes.py" restore build/native-sim-device
+  fi
+  if [ -d "$PRODUCTS" ]; then
+    find "$PRODUCTS" -maxdepth 1 -type d -name '*.app' -exec rm -rf {} +
+  fi
+fi
+
 # Device builds are separate from the simulator's Debug/Release products.
 # An unsigned IPA needs no signing certificate or provisioning profile here.
 echo "Building an unsigned Release IPA for $SCHEME..."
@@ -51,13 +65,15 @@ xcodebuild "${XCODE_ARGS[@]}" \
   -sdk iphoneos \
   -destination 'generic/platform=iOS' \
   -derivedDataPath build/native-sim-device \
+  -clonedSourcePackagesDirPath "$PWD/build/native-sim-source-packages" \
   ARCHS=arm64 \
   CODE_SIGNING_ALLOWED=NO \
   CODE_SIGNING_REQUIRED=NO \
   CODE_SIGN_IDENTITY= \
+  ${XCODE_CACHE_ARGS[@]+"${XCODE_CACHE_ARGS[@]}"} \
   build
 
-APP=$(find build/native-sim-device/Build/Products/Release-iphoneos -maxdepth 1 -type d -name '*.app' | head -1)
+APP=$(find "$PRODUCTS" -maxdepth 1 -type d -name '*.app' | head -1)
 [ -n "$APP" ] || { echo "No device .app produced." >&2; exit 1; }
 PLATFORM=$(/usr/libexec/PlistBuddy -c 'Print CFBundleSupportedPlatforms:0' "$APP/Info.plist")
 if [ "$PLATFORM" != iPhoneOS ]; then
@@ -78,6 +94,9 @@ ditto -c -k --keepParent "$STAGING/Payload" "$STAGING/unsigned.ipa"
 
 # Publish only a complete ZIP. Existing downloads keep their original file open.
 mv -f "$STAGING/unsigned.ipa" "$NATIVE_SIM_IPA_FILE"
+if [ "${NATIVE_SIM_SAVE_MTIMES:-}" = true ]; then
+  python3 "$GITHUB_WORKSPACE/.github/native-sim/xcode-mtimes.py" save build/native-sim-device
+fi
 echo "Unsigned IPA ready: $NATIVE_SIM_IPA_FILE"
 if [ -n "${NATIVE_SIM_PREVIEW_URL:-}" ]; then
   echo "Open this in the same browser used for your authenticated preview:"

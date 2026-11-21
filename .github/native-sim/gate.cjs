@@ -1,4 +1,4 @@
-// native-sim-template-version: 19
+// native-sim-template-version: 20
 /**
  * native-sim auth gate.
  *
@@ -26,11 +26,19 @@ const AGENT_PREFIX = '/agent-device';
 const TARGET_HOST = '127.0.0.1';
 const PORT = Number(process.env.NATIVE_SIM_GATE_PORT || 3199);
 const COOKIE = 'native_sim_k';
-// One fixed, workflow-owned file. No client-supplied filesystem paths.
-const IPA_FILE = process.env.NATIVE_SIM_IPA_FILE || '';
-const IPA_ROUTE = '/__native-sim/unsigned.ipa';
+// Only these fixed, workflow-owned paths are exposed after authentication.
+const files = new Map([
+  ['/__native-sim/unsigned.ipa', {
+    path: process.env.NATIVE_SIM_IPA_FILE, name: 'unsigned.ipa',
+    missing: 'No IPA exported yet. Run native-sim-export-ipa in your SSH session.',
+  }],
+  ['/__native-sim/simulator.app.tar.gz', {
+    path: process.env.NATIVE_SIM_PRIVATE_APP_FILE, name: 'simulator.app.tar.gz',
+  }],
+  ['/__native-sim/build.log', { path: process.env.NATIVE_SIM_PRIVATE_LOG }],
+]);
 
-async function serveIpa(req, res) {
+async function serveFile(req, res, { path, name, missing = 'File is not available.' }) {
   if (!['GET', 'HEAD'].includes(req.method)) {
     res.writeHead(405, { allow: 'GET, HEAD', 'cache-control': 'no-store' });
     res.end();
@@ -38,20 +46,21 @@ async function serveIpa(req, res) {
   }
   let file;
   try {
-    if (!IPA_FILE) throw Object.assign(new Error(), { code: 'ENOENT' });
-    file = await open(IPA_FILE, 'r');
+    if (!path) throw Object.assign(new Error(), { code: 'ENOENT' });
+    file = await open(path, 'r');
     const stat = await file.stat();
     if (!stat.isFile()) throw Object.assign(new Error(), { code: 'ENOENT' });
     if (res.destroyed) { await file.close(); return; }
     res.writeHead(200, {
-      'content-type': 'application/octet-stream',
-      'content-disposition': 'attachment; filename="unsigned.ipa"',
+      'content-type': name ? 'application/octet-stream' : 'text/plain; charset=utf-8',
+      ...(name && { 'content-disposition': `attachment; filename="${name}"` }),
       'content-length': stat.size,
       'cache-control': 'no-store',
       'x-content-type-options': 'nosniff',
     });
     if (req.method === 'HEAD') { await file.close(); res.end(); return; }
-    const stream = file.createReadStream();
+    const stream = stat.size ? file.createReadStream({ end: stat.size - 1 }) : null;
+    if (!stream) { await file.close(); res.end(); return; }
     file = null; // The stream now owns the file handle, including closing it.
     stream.on('error', () => res.destroy());
     res.once('close', () => stream.destroy());
@@ -63,9 +72,7 @@ async function serveIpa(req, res) {
     res.writeHead(error.code === 'ENOENT' ? 404 : 500, {
       'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store',
     });
-    res.end(error.code === 'ENOENT'
-      ? 'No IPA exported yet. Run native-sim-export-ipa in your SSH session.'
-      : 'Unable to read the exported IPA.');
+    res.end(error.code === 'ENOENT' ? missing : 'Unable to read the file.');
   }
 }
 
@@ -158,8 +165,9 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  if (pathnameOf(req) === IPA_ROUTE) {
-    void serveIpa(req, res);
+  const file = files.get(pathnameOf(req));
+  if (file) {
+    void serveFile(req, res, file);
     return;
   }
 

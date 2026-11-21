@@ -1,5 +1,5 @@
 #!/bin/bash
-# native-sim-template-version: 1
+# native-sim-template-version: 2
 set -euo pipefail
 
 if [ -z "${NATIVE_SIM_DEV_CONFIG:-}" ] || [ ! -f "$NATIVE_SIM_DEV_CONFIG" ]; then
@@ -45,6 +45,10 @@ case "$CONTAINER" in
   *.xcodeproj) XCODE_ARGS=(-project "$CONTAINER"); DEFAULT_SCHEME=$(basename "$CONTAINER" .xcodeproj) ;;
 esac
 SCHEME="${NATIVE_SIM_SCHEME:-$DEFAULT_SCHEME}"
+XCODE_CACHE_ARGS=()
+if [ "${NATIVE_SIM_COMPILATION_CACHE:-}" = YES ]; then
+  XCODE_CACHE_ARGS+=(COMPILATION_CACHE_ENABLE_CACHING=YES "COMPILATION_CACHE_CAS_PATH=$PWD/build/ios/CompilationCache.noindex")
+fi
 echo "Rebuilding $SCHEME ($NATIVE_SIM_CONFIGURATION) for $NATIVE_SIM_UDID"
 xcodebuild "${XCODE_ARGS[@]}" \
   -scheme "$SCHEME" \
@@ -52,7 +56,9 @@ xcodebuild "${XCODE_ARGS[@]}" \
   -sdk iphonesimulator \
   -destination "id=$NATIVE_SIM_UDID" \
   -derivedDataPath build/ios \
+  -clonedSourcePackagesDirPath "$PWD/build/native-sim-source-packages" \
   CODE_SIGNING_ALLOWED=NO \
+  ${XCODE_CACHE_ARGS[@]+"${XCODE_CACHE_ARGS[@]}"} \
   build
 
 APP=$(find "build/ios/Build/Products/$NATIVE_SIM_CONFIGURATION-iphonesimulator" -maxdepth 1 -name '*.app' | head -1)
